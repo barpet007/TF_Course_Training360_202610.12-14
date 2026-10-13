@@ -1,0 +1,102 @@
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group: TF-SECRETS
+  - name: location
+    value: 'westeurope'
+
+stages:
+  - stage: CI_SCAN_PLAN
+    displayName: 'Checkov Scan and Plan'
+    jobs:
+      - job: ScanAndPlan
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install checkov
+            displayName: 'Install Checkov'
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              backendType: 'azurerm'
+              backendServiceArm: 'TF-SERVICE-CONNECTION'
+              backendAzureRmResourceGroupName: $(ARM_BACKEND_RG)
+              backendAzureRmStorageAccountName: $(ARM_BACKEND_SA)
+              backendAzureRmContainerName: $(ARM_BACKEND_CONTAINER)
+              backendAzureRmKey: 'day2-lab.terraform.tfstate'
+
+          - script: |
+              checkov --directory . --framework terraform --check CKV_AZURE_44
+            displayName: 'Checkov Security Scan (expected to fail before remediation)'
+
+          - task: TerraformTaskV4@4
+            displayName: 'Terraform Plan'
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              environmentServiceNameAzureRM: 'TF-SERVICE-CONNECTION'
+              commandOptions: '-out=tfplan -var="location=$(location)" -var="resource_group_name=tf-day2-lab-rg" -var="storage_account_name=tfday2labsa001"'
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Terraform Plan'
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)/tfplan'
+              artifact: 'terraform_plan'
+              publishLocation: 'pipeline'
+
+  - stage: CD_APPLY
+    displayName: 'Deployment (Apply)'
+    dependsOn: CI_SCAN_PLAN
+    condition: succeeded('CI_SCAN_PLAN')
+    jobs:
+      - deployment: Apply
+        displayName: 'Terraform Apply'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Terraform Plan'
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'terraform_plan'
+                    targetPath: '$(System.DefaultWorkingDirectory)'
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Init'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    backendType: 'azurerm'
+                    backendServiceArm: 'TF-SERVICE-CONNECTION'
+                    backendAzureRmResourceGroupName: $(ARM_BACKEND_RG)
+                    backendAzureRmStorageAccountName: $(ARM_BACKEND_SA)
+                    backendAzureRmContainerName: $(ARM_BACKEND_CONTAINER)
+                    backendAzureRmKey: 'day2-lab.terraform.tfstate'
+
+                - task: TerraformTaskV4@4
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    environmentServiceNameAzureRM: 'TF-SERVICE-CONNECTION'
+                    commandOptions: 'tfplan'
+
+# Approvals are configured on the Azure DevOps environment named 'production'.
+# The YAML comment alone does not create approvals or enforcement.

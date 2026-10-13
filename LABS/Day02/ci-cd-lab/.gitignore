@@ -1,0 +1,20 @@
+﻿.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+crash.log
+crash.*.log
+prereqs_output.json
+.env
+*.pem
+*.key
+
+# Keep lock file tracked
+!.terraform.lock.hcl
