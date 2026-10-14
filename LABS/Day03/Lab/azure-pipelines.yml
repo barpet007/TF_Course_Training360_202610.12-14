@@ -1,0 +1,202 @@
+trigger:
+  branches:
+    include:
+      - develop
+      - main
+
+parameters:
+  - name: environmentMode
+    type: string
+    default: auto
+    values:
+      - auto
+      - dev
+      - prod
+
+  - name: terraformAction
+    type: string
+    default: apply
+    values:
+      - plan
+      - apply
+      - destroy
+
+variables:
+  tfVersion: '1.3.0'
+  tfBackendContainer: 'tfstate'
+  tfBackendKeyDevelop: 'lab03/dev.terraform.tfstate'
+  tfBackendKeyProd: 'lab03/prod.terraform.tfstate'
+  serviceConnection: 'TF-SERVICE-CONNECTION'
+  variableGroup: 'TF-SECRETS'
+
+stages:
+  - stage: CI
+    displayName: CI - Validate, Scan, Plan
+    jobs:
+      - job: ValidateAndPlan
+        displayName: Validate and plan Terraform
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: UseTerraform@2
+            displayName: Install Terraform
+            inputs:
+              version: '$(tfVersion)'
+
+          - script: |
+              python3 -m pip install --upgrade pip
+              pip install checkov
+            displayName: Install Checkov
+
+          - script: |
+              if [ "$(Build.SourceBranchName)" = "develop" ]; then
+                echo "##vso[task.setvariable variable=SelectedVarFile]dev.tfvars"
+                echo "##vso[task.setvariable variable=SelectedBackendKey]$(tfBackendKeyDevelop)"
+              else
+                echo "##vso[task.setvariable variable=SelectedVarFile]prod.tfvars"
+                echo "##vso[task.setvariable variable=SelectedBackendKey]$(tfBackendKeyProd)"
+              fi
+            displayName: Select environment tfvars and state key
+
+          - task: TerraformTaskV4@4
+            displayName: Terraform init
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              backendServiceArm: '$(serviceConnection)'
+              backendAzureRmResourceGroupName: 'rg-lab03-backend'
+              backendAzureRmStorageAccountName: 'stlab03backend'
+              backendAzureRmContainerName: '$(tfBackendContainer)'
+              backendAzureRmKey: '$(SelectedBackendKey)'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+          - script: |
+              checkov --directory . --framework terraform --external-checks-dir ./checkov/custom_policies --quiet
+            displayName: Run Checkov custom policy scan
+
+          - task: TerraformTaskV4@4
+            displayName: Terraform plan
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              commandOptions: '-var-file=$(SelectedVarFile) -out=tfplan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)'
+              environmentServiceNameAzureRM: '$(serviceConnection)'
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish Terraform plan artifact
+            inputs:
+              targetPath: '$(Build.SourcesDirectory)'
+              artifact: 'terraform-plan'
+
+  - stage: CD
+    displayName: CD - Apply or Destroy
+    dependsOn: CI
+    jobs:
+      - deployment: DeployDev
+        displayName: DEV deployment
+        condition: or(eq('${{ parameters.environmentMode }}', 'dev'), and(eq('${{ parameters.environmentMode }}', 'auto'), eq(variables['Build.SourceBranchName'], 'develop')))
+        environment: 'DEV-LAB03'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download Terraform plan artifact
+                  inputs:
+                    artifact: 'terraform-plan'
+                    targetPath: '$(Pipeline.Workspace)/tfplan'
+
+                - task: UseTerraform@2
+                  displayName: Install Terraform
+                  inputs:
+                    version: '$(tfVersion)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform init for DEV
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    backendServiceArm: '$(serviceConnection)'
+                    backendAzureRmResourceGroupName: 'rg-lab03-backend'
+                    backendAzureRmStorageAccountName: 'stlab03backend'
+                    backendAzureRmContainerName: '$(tfBackendContainer)'
+                    backendAzureRmKey: '$(tfBackendKeyDevelop)'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform apply
+                  condition: ne('${{ parameters.terraformAction }}', 'destroy')
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    commandOptions: '-var-file=dev.tfvars -auto-approve'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    environmentServiceNameAzureRM: '$(serviceConnection)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform destroy
+                  condition: eq('${{ parameters.terraformAction }}', 'destroy')
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'destroy'
+                    commandOptions: '-var-file=dev.tfvars -auto-approve'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    environmentServiceNameAzureRM: '$(serviceConnection)'
+
+      - deployment: DeployProd
+        displayName: PRD deployment
+        condition: or(eq('${{ parameters.environmentMode }}', 'prod'), and(eq('${{ parameters.environmentMode }}', 'auto'), eq(variables['Build.SourceBranchName'], 'main')))
+        environment: 'PRD-LAB03'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download Terraform plan artifact
+                  inputs:
+                    artifact: 'terraform-plan'
+                    targetPath: '$(Pipeline.Workspace)/tfplan'
+
+                - task: UseTerraform@2
+                  displayName: Install Terraform
+                  inputs:
+                    version: '$(tfVersion)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform init for PRD
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'init'
+                    backendServiceArm: '$(serviceConnection)'
+                    backendAzureRmResourceGroupName: 'rg-lab03-backend'
+                    backendAzureRmStorageAccountName: 'stlab03backend'
+                    backendAzureRmContainerName: '$(tfBackendContainer)'
+                    backendAzureRmKey: '$(tfBackendKeyProd)'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform apply
+                  condition: ne('${{ parameters.terraformAction }}', 'destroy')
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'apply'
+                    commandOptions: '-var-file=prod.tfvars -auto-approve'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    environmentServiceNameAzureRM: '$(serviceConnection)'
+
+                - task: TerraformTaskV4@4
+                  displayName: Terraform destroy
+                  condition: eq('${{ parameters.terraformAction }}', 'destroy')
+                  inputs:
+                    provider: 'azurerm'
+                    command: 'destroy'
+                    commandOptions: '-var-file=prod.tfvars -auto-approve'
+                    workingDirectory: '$(System.DefaultWorkingDirectory)'
+                    environmentServiceNameAzureRM: '$(serviceConnection)'

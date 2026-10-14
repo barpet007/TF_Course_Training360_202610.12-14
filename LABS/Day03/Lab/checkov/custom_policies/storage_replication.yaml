@@ -1,0 +1,12 @@
+metadata:
+  name: Azure Storage accounts must use GRS replication
+  id: CKV2_AZURE_CUSTOM_REPL_1
+  category: BACKUP_AND_RECOVERY
+
+definition:
+  cond_type: attribute
+  resource_types:
+    - azurerm_storage_account
+  attribute: account_replication_type
+  operator: equals
+  value: GRS
